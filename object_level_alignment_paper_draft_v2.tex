@@ -1,0 +1,492 @@
+\documentclass{article}
+
+\PassOptionsToPackage{numbers,sort&compress}{natbib}
+
+\usepackage{neurips_2026}
+\usepackage{caption}  % 优化标题间距
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[table]{xcolor}
+\usepackage{wrapfig}
+\title{Hierarchical Graph Alignment for Cross-Modal 3D Scene Grounding}
+
+\author{%
+  David S.~Hippocampus\thanks{Use footnote for providing further information
+    about author (webpage, alternative address)---\emph{not} for acknowledging
+    funding agencies.} \\
+  Department of Computer Science\\
+  Cranberry-Lemon University\\
+  Pittsburgh, PA 15213 \\
+  \texttt{hippo@cs.cranberry-lemon.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Text-guided point-cloud grounding enables robots to ground natural-language descriptions in 3D environments, making it important for embodied AI and human-robot interaction. Existing coarse-to-fine methods primarily rely on global descriptors for submap retrieval, but these descriptors often compress object semantics, spatial relations, and scene layouts into a single vector, thereby limiting discriminability in large-scale scenes. We propose HiGraLoc, a multi-level cross-modal alignment framework that improves the coarse retrieval stage through three complementary branches. The instance branch uses a Hyperbolic Instance Structure Encoder to model hierarchical object semantics, the relation branch aggregates reliability-weighted pairwise spatial relations, and the global branch employs a Global Spectral Graph Encoder to capture multi-frequency scene structure. A Text2Loc-style coordinate regression stage then refines the location estimate within the retrieved submap. Experiments on KITTI360Pose show that HiGraLoc achieves a 19\% improvement in Top-1 recall@10m over existing state-of-the-art methods. Our code and dataset are available at \url{https://github.com/Anonymous09871745/HiGraLoc}.
+\end{abstract}
+\section{Introduction}
+Text-guided point-cloud localization has become a pivotal capability for embodied AI, offering a robust alternative to traditional Visual Place Recognition (VPR). While VPR often fails under varying illumination or seasonal changes, this paradigm grounds nuanced semantic and spatial descriptions directly into 3D geometric maps. By reducing dependence on viewpoint-specific visual cues, it enables agents to reason about urban environments in a more human-like, intuitive manner.
+
+To tackle the inherent complexity of searching across vast urban areas, existing state-of-the-art methods, including Text2Pos \cite{kolmet2022text2pos}, RET \cite{wang2023text}, Text2Loc \cite{xia2024text2loc}, and MambaPlace \cite{shang2024mambaplace}, typically adopt a hierarchical coarse-to-fine localization paradigm. In this framework, the system first performs a coarse-level retrieval to identify the most relevant candidate submap from a large-scale database and subsequently executes a fine-grained regression to determine precise coordinates within the retrieved local context. While this two-stage approach effectively narrows down the search space, it places a heavy burden on the discriminative power of the coarse retrieval stage; any ambiguity in global descriptors or failure to capture structural relationships at this level can lead to irreversible localization errors in the final stage.
+
+Despite their effectiveness, current coarse retrieval modules often rely on globally pooled descriptors. This design is compact but tends to collapse heterogeneous cues into a single representation. In text-guided localization, a query may describe object identities, pairwise spatial relations, and holistic scene layouts at the same time. When different places share similar objects, global descriptors may fail to preserve the relational and structural evidence needed to distinguish them. As a result, errors in coarse retrieval can directly limit the subsequent fine-stage coordinate regression.
+
+To address this limitation, we propose HiGraLoc, a multi-level cross-modal alignment framework for text-guided point-cloud localization. HiGraLoc redesigns the coarse stage with three complementary branches. 
+
+The instance-level branch introduces a Hyperbolic Instance Structure Encoder (HISE), which maps instance features into a Poincaré ball to model hierarchical object-level structure. The relation-level branch constructs directed pairwise relations between instances and aggregates them with learned reliability weights, improving the alignment of spatial expressions such as ``south of'' and ``north of''. The global-level branch adopts a Global Spectral Graph Encoder (GSGE), which applies Chebyshev spectral filtering on an instance graph to capture topology-aware multi-frequency structure, making the global descriptor more discriminative.
+
+These branches capture complementary aspects of a 3D scene: instance-level alignment models what objects are present, relation-level alignment models how objects are arranged, and global-level alignment models the overall scene structure. Their retrieval scores are combined during inference to select a candidate submap, which is then passed to a Text2Loc-style fine stage for coordinate regression. This design preserves the standard coarse-to-fine pipeline while providing a more expressive coarse retrieval signal.
+
+Extensive experiments on KITTI360Pose and our self-built StreetLoc demonstrate that HiGraLoc outperforms state-of-the-art methods. Notably, even when only the global branch is retained, our method still significantly outperforms prior methods that rely on global descriptors. Our contributions are summarized as follows:
+\begin{itemize}
+    \item Multi-level alignment framework: HiGraLoc aligns text and 3D point clouds across instance, relation, and global levels for robust city-scale localization.  
+    \item Instance-level hyperbolic modeling: HISE leverages hyperbolic geometry in a Poincaré ball to capture hierarchical object-level semantics and category granularities.    
+    \item Relation-level spatial reasoning: A reliability-weighted branch aggregates directed spatial relations to improve grounding of complex expressions like ``south of'' or ``north of.''    
+    \item Global-level spectral descriptors: GSGE extracts topology-aware cues via spectral filtering, outperforming prior methods and providing complementary gains.
+\end{itemize}
+\section{Related Work}
+\subsection{Visual Place Recognition}
+Traditional 2D localization techniques generally rely on feature aggregation mechanisms, such as the Vector of Locally Aggregated Descriptors (VLAD) \cite{arandjelovic2016netvlad} and Generalized Mean (GeM), to extract global descriptors from query frames, facilitating direct 2D feature matching. To bolster system reliability, recent studies have explored the inherent correlations between local descriptors and their corresponding cluster centers \cite{li20252}. Simultaneously, the field has seen a shift toward end-to-end Transformer-based architectures to produce more discriminative global embeddings \cite{wang2022transvpr,li2024feature}. Specialized frameworks have also been developed to tackle environmental extremes, including degraded lighting \cite{li2024toward} and drastic shifts in camera perspective \cite{berton2023eigenplaces}. Recent breakthroughs have further pushed the boundaries of VPR, scaling localization capabilities from urban environments to a continental magnitude \cite{lindenberger2025scaling}. Moreover, robust positioning is increasingly achieved through cross-modal retrieval, such as text-to-image \cite{shang2025bridging} or point-cloud-to-image \cite{xu2024c2l} paradigms, which provide critical fallbacks when direct visual input is compromised.
+\subsection{LiDAR Place Recognition}
+LiDAR-based Place Recognition (LPR) generates global descriptors either from unstructured point clouds or Bird’s-Eye View (BEV) representations \cite{lin2024rsbev}. Pioneering works such as PointNetVLAD \cite{uy2018pointnetvlad} integrated PointNet \cite{qi2017pointnet} with the NetVLAD layer to condense spatial points into compact vectors. Subsequent BEV-centric models, like BevPlace \cite{luo2023bevplace} and I2P-Rec \cite{zheng2023i2p}, have improved rotational robustness via geometric transforms and utilized multimodal projections to gather richer spatial cues.\\
+\indent Alternative LPR strategies focus on the intrinsic topology of point clouds through 3D CNNs or attention-driven graphs. For instance, LPD-Net \cite{liu2019lpd} employs graph structures to represent local geometry, while DH3D \cite{du2020dh3d} and SOENet \cite{xia2021soe} emphasize high-fidelity pose refinement. To ensure embedding consistency during incremental learning, InCloud \cite{knights2022incloud} was introduced. Furthermore, Transformer-based LPR systems have gained traction for their ability to model long-range context; TransLoc3D \cite{xu2021transloc3d} utilizes self-attention for global awareness, whereas NDT-Transformer \cite{zhou2021ndt} and PPT-Net \cite{hui2021pyramid} process NDT-transformed data and multi-scale features through hierarchical structures. 
+
+Efficiency in large-scale scenarios is often achieved via sparse 3D convolutions, as demonstrated by MinkLoc3D \cite{komorowski2021minkloc3d}. More recent advancements include LCDNet \cite{cattaneo2022lcdnet}, which adopts optimal transport theory for superior matching, and LoGG3D-Net \cite{vidanapathirana2022logg3d}, which utilizes a local consistency loss to ensure viewpoint-invariant descriptor discriminability.
+\subsection{Cross Modal Localization}
+The domain of text-to-point-cloud localization was established by Text2Pos \cite{kolmet2022text2pos}, which introduced a multi-stage coarse-to-fine pipeline. It was followed by RET \cite{wang2023text}, which leveraged attention mechanisms, and Text2Loc \cite{xia2024text2loc}, which used contrastive learning and a matching-free refinement phase. State space models (SSMs) were recently integrated into this task by MambaPlace \cite{shang2024mambaplace}. While GOTPR \cite{jung2025gotpr} improved efficiency through intermediate graph structures, its utility remains mainly in the coarse retrieval stage. 
+
+Current research also addresses practical bottlenecks such as data scarcity and cross-modal ambiguity. IFRP-T2P \cite{wang2024instance} achieves instance-free positioning using query extractors combined with RowColRPA/RPCA for spatial awareness. Uncertainty modeling has also emerged as an important theme: PMSH \cite{feng2025partially} handles partially matched submaps by propagating uncertainty into the coarse retrieval metric. Similarly, CMMLoc \cite{xu2025cmmloc} tackles incomplete textual descriptions through a Cauchy-Mixture-Model (CMM) framework, further refined by cardinal-direction information and spatial consolidation.
+\section{Method}
+\subsection{Notation Summary}
+We consider the sample index $i$ for each query--reference pair. The textual query is denoted by $\mathcal{Q}_i$, the paired reference submap by $\mathcal{R}_i$, and the retrieved submap by $\tilde{\mathcal{R}}_i$. The candidate gallery is $\mathcal{G}$. For a submap $i$, let $\mathbf{X}_i=[\mathbf{x}_{i,1};\dots;\mathbf{x}_{i,N_i}]\in\mathbb{R}^{N_i\times D}$ denote the instance feature matrix, where $N_i$ is the number of detected instances and $\mathbf{x}_{i,m}\in\mathbb{R}^D$ is the feature of the $m$-th instance $\mathbf{s}_{i,m}$. For the textual side, let $\mathbf{T}_i=[\mathbf{t}_{i,1};\dots;\mathbf{t}_{i,M_i}]\in\mathbb{R}^{M_i\times D}$ denote the text feature matrix, where $M_i$ is the number of text elements and $\mathbf{t}_{i,j}\in\mathbb{R}^D$ is the $j$-th text feature.
+\subsection{Task Formulation}
+HiGraLoc addresses text-guided point-cloud place recognition via a coarse-to-fine strategy. In the coarse stage of HiGraLoc, we retrieve the most relevant point-cloud submap from the gallery using the textual query:
+\begin{equation}
+\tilde{\mathcal{R}}_i = \arg\min_{\mathcal{R} \in \mathcal{G}} d\bigl(f_q(\mathcal{Q}_i), f_r(\mathcal{R})\bigr),
+\label{eq:task_obj_retrieval}
+\end{equation}
+where $f_q(\cdot)$ and $f_r(\cdot)$ encode the query and submap into a shared retrieval space, and $d(\cdot,\cdot)$ is the retrieval metric. 
+
+HiGraLoc decomposes this coarse cross-modal alignment into three complementary branches: instance-level alignment for object semantics, relation-level alignment for pairwise spatial structure, and global-level alignment for holistic scene structure.
+
+In the fine stage, HiGraLoc follows the established Text2Loc-style coordinate regression on the retrieved submap $\tilde{\mathcal{R}}_i$.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{Figure1.pdf}
+    \caption{The coarse retrieval stage of the HiGraLoc framework.}
+    \label{Fig1}
+\end{figure}
+\subsection{Instance-level Alignment}
+Instance-level features capture object semantics, but they also inherit the hierarchical organization of the scene. To model this structure, we introduce the Hyperbolic Instance Structure Encoder (HISE), which maps instance features into a Poincaré ball with learnable curvature. Hyperbolic geometry is suitable for nested layouts since its exponential volume growth naturally supports increasingly fine-grained distinctions away from the origin.
+
+We use the Poincar\'e ball $\mathbb{B}_c^d=\{\mathbf{z}\in\mathbb{R}^d:c\|\mathbf{z}\|^2<1\}$ with curvature $-c$, where $c=\mathrm{softplus}(\rho_c)+\epsilon$ is learnable. Instance features are first projected into the tangent space and lifted to the manifold by the exponential map,
+\begin{equation}
+\mathbf{z}_{i,m}=\exp_{\mathbf{o}}^{c}\!\bigl(W_x\mathbf{x}_{i,m}\bigr),
+\end{equation}
+where $\mathbf{o}$ denotes the origin of the Poincar\'e ball and $W_x$ is a learnable projection matrix. We compute a distance-based manifold aggregation score as
+\begin{equation}
+\alpha_{i,mn}=
+\frac{
+\exp\bigl(\mathrm{sim}_{\mathbb{H}}(\mathbf{z}_{i,m},\mathbf{z}_{i,n})/\tau_h\bigr)
+}{
+\sum_{n'=1}^{N_i}
+\exp\bigl(\mathrm{sim}_{\mathbb{H}}(\mathbf{z}_{i,m},\mathbf{z}_{i,n'})/\tau_h\bigr)
+},
+\end{equation}
+where $\tau_h$ is a temperature parameter, and we define the hyperbolic similarity as
+\begin{equation}
+\mathrm{sim}_{\mathbb{H}}(\mathbf{z}_{i,m},\mathbf{z}_{i,n})
+=
+-d_c^2(\mathbf{z}_{i,m},\mathbf{z}_{i,n}),
+\end{equation}
+with $d_c(\cdot,\cdot)$ denoting the geodesic distance in $\mathbb{B}_c^d$.
+
+Using these weights, we aggregate instances in the local tangent space and map the result back to the manifold,
+\begin{equation}
+\tilde{\mathbf{z}}_{i,m}
+=
+\exp_{\mathbf{z}_{i,m}}^{c}\!\left(
+\sum_{n=1}^{N_i}
+\alpha_{i,mn}
+\log_{\mathbf{z}_{i,m}}^{c}(\mathbf{z}_{i,n})
+\right).
+\end{equation}
+The enhanced manifold features are then converted back to Euclidean space,
+\begin{equation}
+\mathbf{v}^{\mathrm{HISE}}_{i,m}
+=
+W_o\log_{\mathbf{o}}^{c}(\tilde{\mathbf{z}}_{i,m}),
+\qquad
+\mathbf{V}^{\mathrm{HISE}}_i
+=
+[\mathbf{v}^{\mathrm{HISE}}_{i,1},\ldots,\mathbf{v}^{\mathrm{HISE}}_{i,N_i}]^\top .
+\end{equation}
+Finally, we combine them with the original instance features through a gated residual connection,
+\begin{equation}
+\mathbf{P}^{\mathrm{Inst}}_i
+=
+\beta_{\mathrm{inst}}\mathbf{V}^{\mathrm{HISE}}_i
++
+(1-\beta_{\mathrm{inst}})\mathbf{X}_i,
+\qquad
+\beta_{\mathrm{inst}}=\sigma(\rho_{\mathrm{inst}}).
+\end{equation}
+For numerical stability, manifold outputs are projected back to $\mathbb{B}_c^d$ after exponential mapping. For the textual modality, we intentionally use a lightweight MLP to generate instance-level textual descriptors $\mathbf{T}^{\mathrm{Inst}}_i$, since the language encoder already provides strong semantic token representations.
+\subsection{Relation-level Alignment}
+To model discriminative spatial context beyond object-level semantics, we construct relation-aware representations over point-cloud instances. For the $i$-th submap, let $\mathbf{X}_i=[\mathbf{x}_{i,1};\dots;\mathbf{x}_{i,N_i}]\in\mathbb{R}^{N_i \times D}$ denote the instance feature matrix, where $\mathbf{x}_{i,m}$ is the semantic feature of the $m$-th detected instance $\mathbf{s}_{i,m}$. The instance features are extracted by a frozen PointNet++ encoder.\\
+\indent For the point-cloud modality, we first compute the pairwise geometric offset between two instances $\mathbf{s}_{i,m}$ and $\mathbf{s}_{i,n}$ based on their centroids:
+\begin{equation}
+\mathbf{o}_{i,mn}
+=
+\mathrm{centroid}(\mathbf{s}_{i,m})
+-
+\mathrm{centroid}(\mathbf{s}_{i,n}).
+\end{equation}
+This offset encodes the relative spatial displacement from instance $\mathbf{s}_{i,n}$ to instance $\mathbf{s}_{i,m}$, providing geometric cues for modeling directed pairwise relations. We then project the geometric offset into the latent feature space by $\mathbf{g}_{i,mn}=f_{\mathrm{geo}}(\mathbf{o}_{i,mn})$, where $f_{\mathrm{geo}}(\cdot)$ is a learnable geometric embedding function.
+
+To obtain an initial relation representation, we fuse the semantic features of the two instances with their geometric embedding as $\mathbf{e}^{p}_{i,mn}=f_{\mathrm{edge}}(\mathrm{concat}(\mathbf{x}_{i,m},\mathbf{x}_{i,n},\mathbf{g}_{i,mn}))$, where $f_{\mathrm{edge}}(\cdot)$ maps the concatenated semantic-geometric feature into a relation edge representation. The resulting $\mathbf{e}^{p}_{i,mn}$ describes the directed relation from instance $\mathbf{s}_{i,n}$ to instance $\mathbf{s}_{i,m}$.
+
+Since not all pairwise relations are equally reliable or discriminative, we further transform each edge into a relation-aware latent representation. Instead of directly using the raw edge feature, we employ a residual relation projection:
+\begin{equation}
+\boldsymbol{\theta}^{p}_{i,mn}
+=
+\mathrm{LN}
+\left(
+\mathbf{e}^{p}_{i,mn}
++
+\phi_r
+\left(
+\mathbf{e}^{p}_{i,mn}
+\right)
+\right),
+\end{equation}
+where $\phi_r(\cdot)$ is a lightweight MLP and $\mathrm{LN}(\cdot)$ denotes layer normalization. This projection preserves the original edge information while enhancing relation-specific patterns for subsequent reliability estimation.
+
+We then convert the projected relation feature into a scalar reliability score 
+$\rho^{p}_{i,mn}=\sigma(w_r^{\top}\boldsymbol{\theta}^{p}_{i,mn})$, 
+where $w_r$ is a learnable vector and $\sigma(\cdot)$ denotes the sigmoid function. 
+The score $\rho^{p}_{i,mn}$ measures the reliability of the relation between instances 
+$\mathbf{s}_{i,m}$ and $\mathbf{s}_{i,n}$. 
+For each instance $\mathbf{s}_{i,m}$, we normalize the reliability scores over all instances 
+in the same submap using 
+$\alpha^{p}_{i,mn}=\exp(\rho^{p}_{i,mn})/\sum_{n'=1}^{N_i}\exp(\rho^{p}_{i,mn'})$, 
+where $\alpha^{p}_{i,mn}$ represents the normalized importance of the relation from instance 
+$\mathbf{s}_{i,n}$ to instance $\mathbf{s}_{i,m}$.
+
+Finally, we aggregate the relation features associated with each instance $\mathbf{s}_{i,m}$ 
+to obtain the relation-aware point-cloud descriptor set of the submap:
+\begin{equation}
+\mathbf{P}^{\mathrm{Rela}}_i
+=
+\big\{
+\mathbf{p}^{\mathrm{Rela}}_{i,m}
+=
+\sum_{n=1}^{N_i}
+\alpha^{p}_{i,mn}
+\boldsymbol{\theta}^{p}_{i,mn}
+\big\}_{m=1}^{N_i}
+\in \mathbb{R}^{N_i \times 256}.
+\end{equation}
+The resulting descriptor set $\mathbf{P}^{\mathrm{Rela}}_i$ encodes both semantic and pairwise spatial context, enabling the model to capture discriminative relations such as ``next to'', ``behind'', and ``across from''. We apply an analogous relation encoding process to the textual features $\mathbf{T}_i$ and obtain the corresponding textual relation descriptor $\mathbf{T}^{\mathrm{Rela}}_i$.
+\subsection{Global-level Alignment}
+We propose a Global Spectral Graph Encoder (GSGE) to capture global-level structural invariants from point-cloud submaps. GSGE builds a self-similarity graph over object instances and applies Chebyshev spectral filtering to obtain multi-frequency global representations.
+
+Given the point-cloud instance matrix $\mathbf{X}_i\in\mathbb{R}^{N_i \times D}$, we construct a self-similarity adjacency matrix $\mathbf{A}_i\in\mathbb{R}^{N_i	\times N_i}$ from pairwise feature distances,
+\begin{equation}
+A_{i,mn}=\exp\!\left(-\frac{\|\mathbf{x}_{i,m}-\mathbf{x}_{i,n}\|_2^2}{\tau}\right)+\delta_{mn},
+\end{equation}
+where the learnable parameter $\tau>0$ controls the sensitivity of edge weights to feature distances. 
+
+We compute the normalized Laplacian and use its rescaled form for Chebyshev filtering:
+\begin{equation}
+\mathbf{L}_i=\mathbf{I}-\mathbf{D}_i^{-1/2}\mathbf{A}_i\mathbf{D}_i^{-1/2},
+\qquad
+\widetilde{\mathbf{L}}_i=\mathbf{L}_i-\mathbf{I},
+\end{equation}
+where $\mathbf{D}_i$ is the degree matrix of $\mathbf{A}_i$.
+
+On the constructed instance graph, spectral graph filtering is used to extract structural patterns. To avoid the costly eigen-decomposition required by conventional spectral methods, we approximate the filters with Chebyshev polynomials $T_k(\widetilde{\mathbf{L}}_i)$ for efficient graph information propagation.
+The Chebyshev polynomials are defined recursively as
+\begin{equation}
+T_0(\widetilde{\mathbf{L}}_i)=\mathbf{I}, \qquad T_1(\widetilde{\mathbf{L}}_i)=\widetilde{\mathbf{L}}_i, \qquad T_{k+1}(\widetilde{\mathbf{L}}_i)=2\widetilde{\mathbf{L}}_iT_k(\widetilde{\mathbf{L}}_i)-T_{k-1}(\widetilde{\mathbf{L}}_i).
+\end{equation}
+We employ three Chebyshev filters to extract low-frequency, medium-frequency, and high-frequency graph features:
+\begin{equation}
+\mathbf{Y}_i^{r}=\sum_{k=0}^{K-1}\beta_k^{r}\,T_k(\widetilde{\mathbf{L}}_i)\mathbf{X}_i,
+\quad r\in\{l,m,h\},
+\end{equation}
+where $K$ is the polynomial order, and 
+$\boldsymbol{\beta}^{r}=\{\beta_k^{r}\}_{k=0}^{K-1}$ denotes the $r$-th Chebyshev filter. Specifically, 
+$\boldsymbol{\beta}^{l}$, $\boldsymbol{\beta}^{m}$, and $\boldsymbol{\beta}^{h}$ correspond to the low-frequency, medium-frequency, and high-frequency filters, respectively.
+
+The low frequency branch captures smooth global layouts, the medium frequency branch models local object compositions, and the high frequency branch emphasizes fine-grained instance differences. Then, the low-frequency, medium-frequency, and high-frequency representations are fused by a lightweight attention-based aggregation block and then max-pooled to obtain the global point-cloud descriptor $\mathbf{P}^{\mathrm{Glob}}_i$. In parallel, the textual global descriptor $\mathbf{T}^{\mathrm{Glob}}_i$ is obtained by applying an attention operation over the language features followed by max pooling.
+\subsection{Loss Function}
+Textual descriptions are inherently ambiguous compared to precise geometric cues. To avoid over-constraining positive pairs with incomplete textual hints, we adopt an asymmetric repulsion strategy. Language is treated primarily as exclusionary evidence to optimize the separation of negative pairs. For feature sets $\mathcal{U}$ and $\mathcal{V}$, the loss is defined as:
+\begin{equation}
+\mathcal{L}(\mathcal{U}, \mathcal{V}) = -\frac{1}{B} \sum_{i,j=1}^B \mathbb{I}_{ij} \log \bigl( 1 - \frac{1}{2}\mathcal{S}(\mathcal{U}_i, \mathcal{V}_j) \bigr)
+\label{eq:asym_loss}
+\end{equation}
+where $\mathbb{I}_{ij}$ is an indicator function (1 for negative pairs, 0 otherwise). The bidirectional similarity $\mathcal{S}$ is:
+\begin{equation}
+\mathcal{S}(\mathcal{U}_i, \mathcal{V}_j) = \frac{\exp(\lambda_{ij}^{\mathcal{U} \to \mathcal{V}}/\gamma)}{\sum_{b=1}^B \exp(\lambda_{ib}^{\mathcal{U} \to \mathcal{V}}/\gamma)} + \frac{\exp(\lambda_{ji}^{\mathcal{V} \to \mathcal{U}}/\gamma)}{\sum_{b=1}^B \exp(\lambda_{jb}^{\mathcal{V} \to \mathcal{U}}/\gamma)}
+\label{eq:similarity}
+\end{equation}
+where $\gamma$ is a temperature parameter and $\lambda$ denotes the matching score. 
+
+We apply the same asymmetric alignment objective to all three branches independently, using their respective feature granularities: $\mathcal{L}_{\mathrm{Instance}} = \mathcal{L}(\mathbf{P}^{\mathrm{Inst}}_i, \mathbf{T}^{\mathrm{Inst}}_i)$, $\mathcal{L}_{\mathrm{Relation}} = \mathcal{L}(\mathbf{P}^{\mathrm{Rela}}_i, \mathbf{T}^{\mathrm{Rela}}_i)$, and $\mathcal{L}_{\mathrm{Global}} = \mathcal{L}(\mathbf{P}^{\mathrm{Glob}}_i, \mathbf{T}^{\mathrm{Glob}}_i)$, where the inputs represent the collections of instance, relation, and global features within a batch, respectively.
+
+During training, HiGraLoc optimizes the three coarse branches independently; during inference, it sums their similarity scores to produce the final cross-modal similarity.
+\subsection{Fine Stage}
+For the final coordinate regression within the retrieved submap $\tilde{\mathcal{R}}_i$, we follow the fine-stage design of Text2Loc. Specifically, a cascaded cross-attention module fuses geometry-enhanced point-cloud features with aligned text features, and an MLP regressor predicts the relative offset to the submap anchor point. The absolute location is then recovered directly from this offset. The key point is that a better coarse retrieval provides a more accurate candidate submap, which in turn gives the fine stage a better starting point and improves the final localization accuracy.         
+\begin{table*}[t]
+\centering
+\caption{A comprehensive comparison between HiGraLoc and existing state-of-the-art methods on the KITTI360Pose (test set) and StreetLoc dataset. }
+\label{table:compare_with_sota}
+\small 
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ccccccc} % 将第一列从 l 改为 c
+\toprule
+\multirow{4}{*}{Methods} & \multicolumn{6}{c}{Localization Recall ($\epsilon < 5/10m$) $\uparrow$} \\ 
+\cmidrule(lr){2-7} 
+ & \multicolumn{3}{c}{KITTI360Pose} & \multicolumn{3}{c}{StreetLoc} \\ 
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+ & $k = 1$ & $k = 5$ & $k = 10$ & $k = 1$ & $k = 5$ & $k = 10$ \\ 
+\midrule
+Text2Pos ({\color{blue}CVPR'22}) & 0.13/0.20 & 0.33/0.42 & 0.43/0.61 & 0.14/0.17 & 0.27/0.31 & 0.36/0.52 \\
+RET ({\color{blue}AAAI'23}) & 0.16/0.25 & 0.35/0.51 & 0.46/0.65 & 0.13/0.21 & 0.32/0.47 & 0.40/0.58 \\
+Text2Loc ({\color{blue}CVPR'24}) & 0.33/0.48 & 0.60/0.75 & 0.70/0.84 & 0.29/0.42 & 0.47/0.66 & 0.55/0.72 \\
+IFRP-T2P ({\color{blue}ACM MM'24}) & 0.22/0.40 & 0.47/0.68 & 0.58/0.78 & 0.20/0.33 & 0.45/0.63 & 0.53/0.68 \\
+MambaPlace ({\color{blue}IROS'25}) & 0.38/0.52 & 0.66/0.79 & 0.76/0.87 & \underline{0.32}/0.42 & 0.50/\underline{0.70} & 0.58/0.76 \\
+CMMLoc ({\color{blue}CVPR'25}) & \underline{0.39}/0.53 & 0.67/0.80 & 0.77/0.87 & 0.31/\underline{0.44} & 0.50/0.68 & 0.57/\underline{0.78} \\
+PMSH ({\color{blue}ICCV'25}) & \underline{0.39}/\underline{0.55} & \underline{0.68}/\underline{0.81} & \underline{0.78}/\underline{0.89} & 0.30/0.43 & \underline{0.52}/\underline{0.70} & \underline{0.59}/0.77 \\
+\midrule
+\rowcolor[gray]{0.9} HiGraLoc (Ours) & \textbf{0.52/0.74} & \textbf{0.78/0.93} & \textbf{0.84/0.96} & \textbf{0.44/0.56} & \textbf{0.67/0.82} & \textbf{0.76/0.90} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+\section{Experiment}
+\subsection{Dataset Preparation and Experiment Setup}
+We evaluate HiGraLoc on the KITTI360Pose benchmark, which covers a 15.51 km$^2$ urban area across nine sequences. Following the standard protocol, the dataset is divided into training, validation, and testing sets with 28,689, 3,187, and 11,505 query-submap pairs, respectively. 
+
+We further construct a new street-level text-to-point-cloud localization dataset, termed StreetLoc, 
+to evaluate the generalization capability of our model in real-world urban scenarios. StreetLoc is collected along an urban street of approximately $4.7\,\mathrm{km}$ in length, 
+where high-precision 3D point clouds are acquired using a 64-beam LiDAR sensor, and global pose information is recorded with a GPS navigation system. Based on the collected street-level 
+point clouds, we partition the scene into point-cloud submaps following the same protocol as KITTI360Pose and construct query-submap pairs accordingly. In total, StreetLoc contains 1,600 
+query-submap pairs. To support fine-grained semantic relation modeling, we manually annotate the objects in the scenes, covering 19 semantic categories. 
+
+All models are implemented in PyTorch and run on a workstation with a 128-core AMD EPYC CPU and an NVIDIA RTX V100 32GB GPU. HiGraLoc is trained for 20 epochs in the coarse retrieval stage and 100 epochs in the fine localization stage, using the same hyperparameter settings as the baselines for fair comparison.
+\subsection{Overall Performance}
+We first compare HiGraLoc with state-of-the-art methods on the KITTI360Pose benchmark. 
+As shown in Table~\ref{table:compare_with_sota}, HiGraLoc achieves the best performance across the evaluated metrics. 
+On the test set, HiGraLoc reaches a Top-1 localization recall of 0.74 at the 10m threshold, outperforming the strongest baseline PMSH by an absolute margin of 0.19. Under the stricter 5m threshold, HiGraLoc also improves the Top-1 recall from 0.39 to 0.52. These results indicate that the proposed multi-level alignment strategy enables more accurate localization than methods relying mainly on global-level representations.
+
+We further evaluate all methods on our newly constructed StreetLoc dataset. HiGraLoc again obtains the best results across all evaluation settings, achieving 0.44/0.56 Top-1 recall under the 5m/10m thresholds. Compared with the best competing methods, HiGraLoc brings clear improvements, especially at larger retrieval ranks, reaching 0.67/0.82 for Top-5 and 0.76/0.90 for Top-10. This suggests the effectiveness and generalization ability of HiGraLoc in real-world street-level scenarios.
+\begin{table*}[t]
+\small 
+\centering
+\begin{minipage}{0.52\textwidth}
+    \centering
+    \caption{Coarse-stage submap retrieval accuracy on KITTI360Pose (test set). HiGraLoc (G) denotes the variant of our method that only utilizes the global branch in the coarse stage.}
+    \label{table:compare_coarse_stage}
+    \setlength{\tabcolsep}{10pt}
+    \begin{tabular}{cccc}
+    \toprule
+    \multirow{2}{*}{Methods} & \multicolumn{3}{c}{Submap Retrieval Recall $\uparrow$} \\ 
+    \cmidrule(lr){2-4}
+    & $k = 1$ & $k = 3$ & $k = 5$ \\ 
+    \midrule
+    Text2Loc   & 0.28 & 0.49 & 0.58 \\
+    IFRP-T2P   & 0.23 & 0.39 & 0.48 \\
+    MambaPlace & 0.31 & 0.53 & 0.62 \\
+    CMMLoc     & 0.32 & 0.53 & 0.63 \\
+    PMSH       & 0.34 & 0.56 & 0.65 \\ 
+    \midrule
+  \rowcolor[gray]{0.9}  HiGraLoc  (G) & \underline{0.39} & \underline{0.62} & \underline{0.71} \\
+  \rowcolor[gray]{0.9}  HiGraLoc     & \textbf{0.51} & \textbf{0.75} & \textbf{0.82} \\ 
+    \bottomrule
+    \end{tabular}
+\end{minipage}
+\hfill 
+\begin{minipage}{0.42\textwidth}
+    \centering
+    \caption{Ablation study of coarse retrieval branches on KITTI360Pose.}
+    \label{table:ablation_coarse_loss}
+    \setlength{\tabcolsep}{5pt}
+    \begin{tabular}{cccccc}
+    \toprule
+    \multicolumn{3}{c}{Branches} & \multicolumn{3}{c}{Recall $\uparrow$} \\ 
+    \cmidrule(lr){1-3} \cmidrule(lr){4-6}
+    Rel. & Inst. & Glo. & $k=1$ & $k=3$ & $k=5$ \\ 
+    \midrule
+    \checkmark & & & 0.46 & 0.70 & 0.78 \\ 
+    & \checkmark & & 0.48 & 0.72 & 0.79 \\
+    & & \checkmark & 0.39 & 0.62 & 0.71 \\ 
+    \checkmark & \checkmark & & 0.50 & 0.74 & 0.81 \\ 
+    \checkmark & & \checkmark & 0.48 & 0.72 & 0.80 \\ 
+    & \checkmark & \checkmark & 0.49 & 0.73 & 0.80 \\ 
+    \checkmark & \checkmark & \checkmark & \textbf{0.51} & \textbf{0.75} & \textbf{0.82} \\ 
+    \bottomrule
+    \end{tabular}
+\end{minipage}
+\end{table*}
+The coarse-stage submap retrieval results presented in Table~\ref{table:compare_coarse_stage} reveal the underlying factors behind the success of HiGraLoc. By decomposing the retrieval task into instance, relation, and global alignment, HiGraLoc captures scene structures across multiple granularities, leading to a substantial improvement in the quality of candidate selection. On the test set, HiGraLoc achieves a Top-1 retrieval recall of 0.51 and a Top-5 recall of 0.82, representing absolute gains of 0.17 and 0.17, respectively, over the previous state-of-the-art method PMSH (0.34/0.65). These results suggest that the coarse retrieval stage remains a critical bottleneck in text-to-point-cloud localization, and that our multi-level structural alignment helps mitigate the information loss inherent in methods that rely solely on global descriptors.
+
+To validate the global design, we compare HiGraLoc (G) with global-descriptor methods in Table~\ref{table:compare_coarse_stage}. HiGraLoc (G) achieves 0.39/0.62/0.71 Recall@1/3/5, outperforming PMSH by 0.05/0.06/0.06. These results indicate that GSGE is already effective on its own, even without the instance and relation branches. In particular, the multi-frequency spectral filtering and fusion may help preserve scene-level topology and capture complementary structural patterns across different spatial scales, making the learned global descriptor more discriminative for semantically similar submaps.
+\subsection{Ablation for Three Branches}
+To verify each branch's independent contribution, we progressively add branches and measure retrieval recall. As shown in Table~\ref{table:ablation_coarse_loss}, each single branch provides meaningful gains (Top-1: 0.39--0.48), two-branch combinations further improve performance, and the full three-branch model achieves the best Top-1 recall of 0.51, surpassing single branches by 3--12 points and two-branch combinations by 1--3 points.
+
+The results show that the instance branch performs best alone (Top-1: 0.48), suggesting that the hierarchical object structure captured by HISE is the most discriminative signal for cross-modal matching. The relation branch (0.46) outperforms the global branch (0.39), suggesting that pairwise spatial relationships may be more informative than global structural cues for distinguishing semantically similar candidates. Although weakest alone, the global branch remains complementary: the full model improves over the relation-plus-instance setting by 1 point at Top-1, suggesting that the multi-frequency scene structure captured by GSGE is complementary to hierarchical and relational cues.
+
+Overall, the additive gains support HiGraLoc's design of optimizing three alignment objectives and aggregating their similarity scores. The diminishing gain from the third branch suggests some cross-level redundancy, but each branch still captures distinct geometric or semantic information that cannot be fully replaced by the others.
+\begin{table}[htbp]
+    \centering
+    \small % 使用标准小字号，视觉效果最“正常”
+    \renewcommand{\arraystretch}{1.2}
+    
+    % 第一个表格（Instance Branch）
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \caption{Ablation study of Instance-level Alignment.}
+        \label{tab:ablation_instance_final}
+        \setlength{\tabcolsep}{7.5pt} % 增加列间距，不再挤在一起
+        \begin{tabular}{l|ccc}
+            \toprule
+            \multirow{2}{*}{Method / Variation} & \multicolumn{3}{c}{Recall@$k$ ($\uparrow$)} \\
+            \cmidrule{2-4}
+            & 1 & 3 & 5 \\ 
+            \midrule
+            w/o Poincar\'e ball         & 0.44 & 0.66 & 0.76 \\
+            w/o Manifold Agg.           & 0.37 & 0.62 & 0.72 \\ 
+            w/o Gated Residual          & 0.46 & 0.71 & 0.78 \\
+            \midrule
+            \rowcolor[gray]{0.9} \textbf{Instance (Full)} & \textbf{0.48} & \textbf{0.72} & \textbf{0.79} \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \hfill % 自动填充中间的空白
+    % 第二个表格（Relation Branch）
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \caption{Ablation study of Relation-level Alignment.}
+        \label{tab:ablation_relation_refined}
+        \setlength{\tabcolsep}{7.5pt}
+        \begin{tabular}{l|ccc}
+            \toprule
+            \multirow{2}{*}{Method / Variation} & \multicolumn{3}{c}{Recall@$k$ ($\uparrow$)} \\
+            \cmidrule{2-4}
+            & 1 & 3 & 5 \\ 
+            \midrule
+            w/o  Instance Semantics           & 0.38 & 0.69 & 0.70 \\
+            w/o Geometric Offsets            & 0.41 & 0.66 & 0.75 \\
+            w/o Reliable Agg.        & 0.43 & 0.67 & 0.74 \\
+            \midrule
+            \rowcolor[gray]{0.9} \textbf{Relation (Full)} & \textbf{0.46} & \textbf{0.70} & \textbf{0.78} \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+\end{table}
+\subsection{Ablation for Key Components}
+\subsubsection{Analysis of Instance-level Alignment}
+Table~\ref{tab:ablation_instance_final} ablates three core HISE components: w/o Poincaré ball replaces the hyperbolic manifold with Euclidean space; w/o Manifold Aggregation replaces tangent-space fusion with a standard MLP; and w/o Gated Residual removes adaptive residual fusion with the original instance features.
+
+Replacing the Poincaré ball with Euclidean space lowers Recall@1 from 0.48 to 0.44, suggesting that hyperbolic geometry better models the hierarchical and nested structure of 3D scenes. Removing manifold aggregation yields the largest drop, reducing Recall@1 to 0.37, which suggests that tangent-space instance interaction via logarithmic and exponential maps is crucial for preserving geometric integrity during global context fusion. Removing the gated residual slightly degrades performance, indicating that it helps retain original semantic information and produces a more robust instance representation.
+\subsubsection{Analysis of Relation-level Alignment}
+Table~\ref{tab:ablation_relation_refined} evaluates the relation-level branch with three variants: w/o Instance Semantics removes object instance features, w/o Geometric Offsets removes relative position information, and w/o Reliable Aggregation replaces learnable weighting with standard max-pooling. Removing either instance semantics or geometric offsets causes a substantial performance drop, showing that discriminative relation modeling depends on the joint use of object semantics and relative spatial offsets between instances.
+
+Reliable aggregation is also important: replacing the learnable reliability score with max-pooling reduces Recall@1 by 3 percent. This suggests that pairwise relations have unequal reliability, and the proposed scoring mechanism helps emphasize stable, discriminative spatial configurations while suppressing noisy or ambiguous ones.
+\setlength{\intextsep}{4pt}
+\setlength{\columnsep}{8pt}
+\begin{wraptable}{r}{0.48\textwidth}
+    \centering
+    \small
+    \caption{Ablation study of Global-level Alignment on KITTI360Pose.}
+    \label{tab:ablation_global_wrap}
+    \renewcommand{\arraystretch}{1.1}
+    \setlength{\tabcolsep}{3.5pt}
+    \begin{tabular}{l|ccc}
+        \toprule
+        \multirow{2}{*}{Method / Variation} & \multicolumn{3}{c}{Recall@$k$ ($\uparrow$)} \\
+        \cmidrule{2-4}
+        & 1 & 3 & 5 \\ 
+        \midrule
+        w/o Self-similarity Graph        & 0.32 & 0.55 & 0.65 \\
+        w/o Low-frequency Comp.          & 0.37 & 0.61 & 0.69 \\
+        w/o Mid-frequency Comp.          & 0.38 & 0.60 & 0.70 \\
+        w/o High-frequency Comp.         & \textbf{0.39} & 0.59 & 0.70 \\
+        \midrule
+        \rowcolor[gray]{0.9} \textbf{Global (Full)} & \textbf{0.39} & \textbf{0.62} & \textbf{0.71} \\
+        \bottomrule
+    \end{tabular}
+    \vspace{-10pt}
+\end{wraptable}
+\subsubsection{Analysis of Global-level Alignment}
+The self-similarity graph appears to be the most critical component, as its removal triggers the sharpest decline in Recall@1 from 0.39 to 0.32. This suggests that establishing a graph-based topological foundation is important for capturing holistic structural information and providing a robust geometric signature that resists local instance variations. Furthermore, removing any frequency branch degrades performance on at least one recall metric, supporting the effectiveness of low-frequency (global layouts), mid-frequency (structural patterns), and high-frequency (fine-grained details) features. 
+\section{Conclusion}
+In this paper, we presented HiGraLoc, a hierarchical graph alignment framework for text-guided point-cloud localization. By decomposing coarse retrieval into instance-level hyperbolic modeling, relation-level spatial reasoning, and global-level spectral representation learning, HiGraLoc captures complementary semantic, relational, and structural cues in 3D scenes. This multi-level design improves candidate submap retrieval and provides a stronger starting point for the subsequent Text2Loc-style fine-stage regression. Extensive experiments on KITTI360Pose and StreetLoc datasets show that HiGraLoc consistently outperforms existing state-of-the-art methods. These results suggest that hierarchical cross-modal alignment is a promising direction for scalable text-guided 3D localization in complex urban environments.
+\begin{ack}
+Use unnumbered first-level headings for the acknowledgments. All acknowledgments
+go at the end of the paper before the list of references. Moreover, you are required to declare
+funding (financial activities supporting the submitted work) and competing interests (related financial activities outside the submitted work).
+More information about this disclosure can be found at: \url{https://neurips.cc/Conferences/2026/PaperInformation/FundingDisclosure}.
+
+Do {\bf not} include this section in the anonymized submission, only in the final paper. You can use the \texttt{ack} environment provided in the style file to automatically hide this section in the anonymized submission.
+\end{ack}
+
+\bibliographystyle{plainnat}
+\bibliography{sample-base}
+
+\appendix
+\section{Technical appendices and supplementary material}
+\subsection{Visualization Analysis}
+In this section, we further investigate the performance of HiGraLoc in 3D scene grounding through a visual presentation of prediction results on the KITTI360Pose dataset (see Figure \ref{Fig2} and Figure \ref{Fig3}). These qualitative cases not only demonstrate the model's efficacy in decoding intricate linguistic instructions but also highlight its robustness in achieving semantically consistent mapping within expansive search spaces. The panels provide a structured layout of the original text queries, ground-truth references, and the corresponding Top-1 to Top-3 candidate submaps. We employ red dots to denote the actual coordinates ($L_{gt}$) and blue dots to mark the model's estimated points ($\boldsymbol{\eta}$). For qualitative assessment, candidate submaps where retrieval is successful and the error remains within 10 meters are highlighted with green borders; otherwise, they are marked with red borders to indicate significant deviations.
+\begin{figure*}
+    \centering
+    \includegraphics[width=1\linewidth]{2_1.pdf}
+    \caption{The first set of qualitative visualization results produced by HiGraLoc.}
+    \label{Fig2}
+\end{figure*}
+\begin{figure*}
+    \centering
+    \includegraphics[width=\linewidth]{2_2.pdf}
+    \caption{The second set of qualitative visualization results produced by HiGraLoc.}
+    \label{Fig3}
+\end{figure*}
+
+As observed from the representative samples, the integration of hierarchical spatial logic modeling enables HiGraLoc to successfully constrain the target within the top three candidates in the vast majority of scenarios. This superior retrieval recall underscores the critical role of our multi-branch alignment mechanism in bridging the cross-modal gap between natural language and 3D point cloud features. However, an attribution analysis of the rare failure cases indicates that grounding accuracy is primarily hindered by "perceptual aliasing"—where geographically distant areas (e.g., exceeding 1000 meters) with highly similar geometric topologies lead to retrieval confusion. This suggests that the discriminative capability of the coarse retrieval phase remains the primary bottleneck in large-scale urban environments. Future efforts should focus on developing more distinctive local topological representations to further enhance the reliability of global spatial anchoring.
+
+\subsection{Computational Resources}
+To further analyze the computational overhead of the proposed method, we compare HiGraLoc with the current state-of-the-art method PMSH in the coarse retrieval stage. Specifically, we evaluate the computational complexity of the two methods in terms of model parameters and inference runtime.
+
+In the coarse retrieval stage, PMSH contains \(372\)M parameters in total, including \(336.39\)M backbone parameters and \(35.61\)M non-backbone parameters, with an inference runtime of approximately \(39\) ms. In comparison, HiGraLoc contains \(381.85\)M parameters in total, where the backbone also accounts for \(336.39\)M parameters and the non-backbone components account for \(45.45\)M parameters, with an inference runtime of approximately \(44\) ms.
+
+It can be observed that HiGraLoc only introduces an additional \(9.85\)M non-backbone parameters compared with PMSH, while increasing the inference runtime by only about \(5\) ms. This marginal overhead mainly comes from the proposed multi-level spatial feature alignment module, which is designed to more effectively model the structured correspondence between textual descriptions and point-cloud scenes. Meanwhile, since both methods adopt the same T5 text encoder and PointNet++ point-cloud encoder, the overall runtime is dominated by the backbone components. Therefore, HiGraLoc maintains a computational overhead comparable to that of PMSH.
+
+More importantly, HiGraLoc achieves substantial performance improvements in the coarse retrieval stage without introducing significant additional computational cost. This demonstrates that the proposed structured alignment mechanism is both parameter-efficient and computationally efficient, enabling more effective cross-modal feature matching while preserving inference efficiency, and thereby leading to superior text-to-point-cloud localization performance.
+
+\subsection{Limitations and Future Work}
+Despite the robust grounding performance of HiGraLoc, certain constraints suggest avenues for subsequent refinement. A primary limitation lies in the framework’s current reliance on a closed-set semantic taxonomy for instance extraction and alignment. Real-world urban landscapes, however, are characterized by an almost infinite variety of physical entities, paired with the inherent ambiguity and unconstrained nature of natural language. Consequently, the precision of scene association may be compromised when the system encounters out-of-distribution objects or highly idiosyncratic linguistic patterns that deviate from the training corpus.
+
+To mitigate these issues, our future research will emphasize the integration of Large Language Models (LLMs) and open-vocabulary 3D perception strategies. By harnessing the extensive common-sense reasoning and semantic elasticity of foundation models, we seek to decouple the grounding process from fixed category definitions. This transition will enable the architecture to dynamically associate arbitrary, free-form textual queries with novel 3D instances, thereby significantly enhancing the scalability and generalization of cross-modal interaction in unstructured and heterogeneous environments.
+
+\subsection{Broader Impacts}
+The introduction of HiGraLoc establishes a novel technical pathway for the active perception and spatial cognition of autonomous agents within complex urban environments. By integrating the logical depth of natural language with the structural information of 3D point clouds, this research not only bolsters the operational resilience of autonomous delivery and navigation systems in extreme conditions—such as low-light or smoke-filled scenarios where traditional visual sensors often fail—but also enables the semantic management of large-scale urban infrastructure. Such a language-guided scene anchoring mechanism significantly diminishes the reliance of automated systems on high-cost, high-bandwidth sensor data, thereby propelling the evolution of intelligent robotics toward greater energy efficiency and reliability.
+
+On a societal level, this work substantially enhances the inclusivity and intuitiveness of human-robot interaction. By enabling non-technical users to direct service robots through natural language instructions, the technology effectively bridges the digital divide, offering more accessible and convenient assistive living solutions for the elderly and the visually impaired. Furthermore, compared to conventional video-based navigation, the semantic association paradigm between text and point clouds holds a distinct advantage in privacy preservation for public space applications. It establishes spatial mappings through abstract topological structures rather than sensitive imagery, thereby better safeguarding individual privacy boundaries while maintaining public safety.
+\newpage
+\input{checklist.tex}
+
+\end{document}

@@ -1,0 +1,229 @@
+\documentclass{article}
+
+\PassOptionsToPackage{numbers,sort&compress}{natbib}
+
+\usepackage{neurips_2026}
+\usepackage{caption}  % 优化标题间距
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[table]{xcolor}
+\usepackage{wrapfig}
+\title{Hierarchical Graph Alignment for Cross-Modal 3D Scene Grounding}
+
+\author{%
+  David S.~Hippocampus\thanks{Use footnote for providing further information
+    about author (webpage, alternative address)---\emph{not} for acknowledging
+    funding agencies.} \\
+  Department of Computer Science\\
+  Cranberry-Lemon University\\
+  Pittsburgh, PA 15213 \\
+  \texttt{hippo@cs.cranberry-lemon.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Cross-modal place recognition aims to retrieve a target 3D location from a spatial map using a natural language description. Most existing methods follow a global descriptor matching paradigm, where the text query and each 3D scene cell are independently compressed into two single vectors and compared by global similarity. Although simple and widely adopted, this paradigm tends to discard the fine-grained object correspondences that are essential for language-guided localization. In this paper, we challenge the necessity of global descriptors and propose OLA-Place, an Object-Level Alignment framework for cross-modal place recognition without global descriptors. Instead of representing a query or a scene cell as a single holistic embedding, OLA-Place formulates place recognition as set-to-set semantic alignment between textual object mentions and 3D object instances. The framework contains three key modules: ObjectSet Encoder (OSE), which extracts object-level representations from both language descriptions and 3D scene cells; Object Message Encoder (OME), which injects intra-set object-context information while preserving object-level granularity; and Masked Max Alignment (MMA), which computes the query-cell matching score by aligning each textual object mention to its most similar valid 3D object. This formulation is permutation-invariant, naturally handles variable-size object sets, and requires no object-level correspondence annotations. Extensive experiments show that object-level alignment alone significantly outperforms global descriptor-based methods, demonstrating that cross-modal place recognition is better understood as an object-level semantic correspondence problem rather than a global embedding retrieval problem.
+\end{abstract}
+
+\section{Introduction}
+
+Cross-modal place recognition retrieves a target 3D location from a spatial map using a natural language query. Given a description such as ``a red car is parked near a pole in front of a building'', the system must find the corresponding 3D scene cell from a gallery. This problem is central to language-guided localization, embodied navigation, robotics, and autonomous driving. Most text-guided point-cloud localization pipelines adopt a coarse-to-fine strategy: a coarse module first retrieves candidate 3D cells, and a fine module then estimates the precise coordinate inside the retrieved cell. Since the fine stage is strongly bounded by the retrieved candidates, this paper focuses on the coarse cross-modal place recognition stage.
+
+A common coarse retrieval paradigm is global descriptor matching. A text encoder compresses the whole query into a vector $\mathbf{z}_q=f_T(q)$, a 3D encoder compresses each cell into $\mathbf{z}_C=f_C(C)$, and retrieval is performed by $S(q,C)=\cos(\mathbf{z}_q,\mathbf{z}_C)$. This formulation is efficient, but it forces all objects, colors, geometry, and spatial cues into a single embedding before matching. Such compression can obscure fine-grained correspondences, e.g., whether the textual mention ``red car'' is actually grounded by a car object in the candidate cell.
+
+We argue that language-based place recognition is inherently object-centric. Natural language queries usually describe places through objects and their attributes, while 3D cells are also composed of object instances. Therefore, the shared semantic units between the two modalities are objects rather than whole-scene descriptors. This motivates a different formulation: instead of comparing two global vectors, we directly align textual object-level embeddings with 3D object-level embeddings.
+
+We propose OLA-Place, a global-descriptor-free framework for cross-modal place recognition. OLA-Place represents a query as textual object features and a 3D cell as scene object features. It consists of three key components. First, OSE maps both modalities into object-indexed representations: textual units are encoded as language-side object features, while 3D object instances are encoded from point-cloud geometry, semantic attributes, color, and position cues. Second, OME refines scene object features by modeling intra-cell object context and relative geometry, while still preserving one feature vector for each object slot instead of pooling them into a global scene descriptor. Third, MMA compares the two object sets by computing pairwise similarities, masking invalid padded objects, and grounding each textual object feature to its most similar valid 3D object. The query-cell score is obtained by averaging these best-match similarities across textual features. No object-level correspondence labels are required; only query-cell pair supervision is used.
+
+In other words, OSE provides a compact object-wise representation for each modality, OME enriches the 3D object set with local context without collapsing it into a single descriptor, and MMA turns the two sets into a retrieval score through masked one-to-many grounding. This division of labor keeps the overall pipeline object-centric from input encoding to final matching, which is precisely what enables our descriptor-free formulation.
+
+The main contributions are:
+\begin{itemize}
+    \item Object-Centric Retrieval Paradigm: We move away from the traditional global-descriptor matching paradigm and propose an object-centric framework for cross-modal place recognition. By aligning textual descriptions with 3D object instances, we avoid the information loss inherent in compressing entire scenes and queries into single vectors.
+    \item The OLA-Place Framework: We introduce OLA-Place, which uses OSE for object-wise encoding, OME for contextual 3D object refinement, and MMA for masked grounding. This design enables fine-grained retrieval while remaining entirely descriptor-free.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Visual Place Recognition}
+Traditional 2D localization techniques generally rely on feature aggregation mechanisms, such as the Vector of Locally Aggregated Descriptors (VLAD) \cite{arandjelovic2016netvlad} and Generalized Mean (GeM), to extract global descriptors from query frames, facilitating direct 2D feature matching. To bolster system reliability, recent studies have explored the inherent correlations between local descriptors and their corresponding cluster centers \cite{li20252}. Simultaneously, the field has seen a shift toward end-to-end Transformer-based architectures to produce more discriminative global embeddings \cite{wang2022transvpr,li2024feature}. Specialized frameworks have also been developed to tackle environmental extremes, including degraded lighting \cite{li2024toward} and drastic shifts in camera perspective \cite{berton2023eigenplaces}. Recent breakthroughs have further pushed the boundaries of VPR, scaling localization capabilities from urban environments to a continental magnitude \cite{lindenberger2025scaling}. Moreover, robust positioning is increasingly achieved through cross-modal retrieval, such as text-to-image \cite{shang2025bridging} or point-cloud-to-image \cite{xu2024c2l} paradigms, which provide critical fallbacks when direct visual input is compromised.
+\subsection{LiDAR Place Recognition}
+LiDAR-based Place Recognition (LPR) generates global descriptors either from unstructured point clouds or Bird’s-Eye View (BEV) representations \cite{lin2024rsbev}. Pioneering works such as PointNetVLAD \cite{uy2018pointnetvlad} integrated PointNet \cite{qi2017pointnet} with the NetVLAD layer to condense spatial points into compact vectors. Subsequent BEV-centric models, like BevPlace \cite{luo2023bevplace} and I2P-Rec \cite{zheng2023i2p}, have improved rotational robustness via geometric transforms and utilized multimodal projections to gather richer spatial cues.\\
+\indent Alternative LPR strategies focus on the intrinsic topology of point clouds through 3D CNNs or attention-driven graphs. For instance, LPD-Net \cite{liu2019lpd} employs graph structures to represent local geometry, while DH3D \cite{du2020dh3d} and SOENet \cite{xia2021soe} emphasize high-fidelity pose refinement. To ensure embedding consistency during incremental learning, InCloud \cite{knights2022incloud} was introduced. Furthermore, Transformer-based LPR systems have gained traction for their ability to model long-range context; TransLoc3D \cite{xu2021transloc3d} utilizes self-attention for global awareness, whereas NDT-Transformer \cite{zhou2021ndt} and PPT-Net \cite{hui2021pyramid} process NDT-transformed data and multi-scale features through hierarchical structures. 
+
+Efficiency in large-scale scenarios is often achieved via sparse 3D convolutions, as demonstrated by MinkLoc3D \cite{komorowski2021minkloc3d}. More recent advancements include LCDNet \cite{cattaneo2022lcdnet}, which adopts optimal transport theory for superior matching, and LoGG3D-Net \cite{vidanapathirana2022logg3d}, which utilizes a local consistency loss to ensure viewpoint-invariant descriptor discriminability.
+\subsection{Cross Modal Localization}
+The domain of text-to-point-cloud localization was established by Text2Pos \cite{kolmet2022text2pos}, which introduced a multi-stage coarse-to-fine pipeline. It was followed by RET \cite{wang2023text}, which leveraged attention mechanisms, and Text2Loc \cite{xia2024text2loc}, which used contrastive learning and a matching-free refinement phase. State space models (SSMs) were recently integrated into this task by MambaPlace \cite{shang2024mambaplace}. While GOTPR \cite{jung2025gotpr} improved efficiency through intermediate graph structures, its utility remains mainly in the coarse retrieval stage. 
+
+Current research also addresses practical bottlenecks such as data scarcity and cross-modal ambiguity. IFRP-T2P \cite{wang2024instance} achieves instance-free positioning using query extractors combined with RowColRPA/RPCA for spatial awareness. Uncertainty modeling has also emerged as an important theme: PMSH \cite{feng2025partially} handles partially matched submaps by propagating uncertainty into the coarse retrieval metric. Similarly, CMMLoc \cite{xu2025cmmloc} tackles incomplete textual descriptions through a Cauchy-Mixture-Model (CMM) framework, further refined by cardinal-direction information and spatial consolidation.
+
+
+\section{Method}
+
+\subsection{Task Formulation and Notation}
+
+OLA-Place focuses on the coarse retrieval stage of text-guided point-cloud localization. Let $\mathcal{Q}=\{q_i\}_{i=1}^{N_q}$ denote the set of language queries and $\mathcal{G}=\{C_j\}_{j=1}^{N_c}$ denote the gallery of 3D scene cells. For each query $q_i$, coarse retrieval aims to find
+\begin{equation}
+\widetilde{C}_i=\arg\max_{C_j\in\mathcal{G}} S(q_i,C_j),
+\end{equation}
+where $S(q_i,C_j)$ is the query-cell matching score.
+
+The core design of OLA-Place is to compute $S(q_i,C_j)$ without global descriptors. For a mini-batch of size $B$, the text encoder returns textual object features
+\begin{equation}
+\mathbf{T}=F_{\mathrm{Object}}^{T}\in\mathbb{R}^{B\times M\times d},
+\end{equation}
+and the 3D branch returns scene object features and masks
+\begin{equation}
+\mathbf{O}=F_{\mathrm{Object}}^{P}\in\mathbb{R}^{B\times N\times d},
+\qquad
+\mathbf{M}\in\mathbb{R}^{B\times N\times 1}.
+\end{equation}
+Here $M$ is the number of textual object-level units, $N$ is the pre-defined number of object slots per cell, and $d$ is the embedding dimension. We denote the $m$-th textual feature of query $q_i$ by $\mathbf{t}_{im}\in\mathbb{R}^{d}$, the $n$-th object feature of cell $C_j$ by $\mathbf{o}_{jn}\in\mathbb{R}^{d}$, and the corresponding binary occupancy indicator by $M_{jn}\in\{0,1\}$. A valid object slot has $M_{jn}=1$, while a padded slot has $M_{jn}=0$.
+
+The implemented pipeline is therefore
+\begin{equation}
+q_i \rightarrow \mathbf{T}_i,
+\qquad
+C_j \rightarrow (\mathbf{O}_j,\mathbf{M}_j),
+\end{equation}
+followed by the masked max-alignment score described in Sec.~\ref{sec:masked_alignment}. No single global vector is produced or compared for retrieval.
+
+\subsection{Textual Object Encoding}
+
+The textual pathway consists of a pre-trained language backbone followed by lightweight contextual modules. Given a batch of textual descriptions, the encoder first splits each query into $M$ sentence-level or description-level textual units. Let $u_{im}$ denote the $m$-th textual unit of query $q_i$. All textual units are tokenized and passed through the language backbone. Let
+\begin{equation}
+\mathbf{H}_{im}\in\mathbb{R}^{L_m\times d_T}
+\end{equation}
+be the token-level hidden states of unit $u_{im}$, where $L_m$ is its token length and $d_T$ is the language-model hidden dimension. If fixed language embeddings are enabled, these hidden states are detached during training.
+
+The encoder then applies a token-level recurrent layer, several intra-unit Transformer encoder layers, and max pooling over tokens. We write this step compactly as
+\begin{equation}
+\mathbf{s}_{im}=\operatorname{MaxPool}\bigl(\operatorname{IntraEnc}(\mathbf{H}_{im})\bigr),
+\end{equation}
+where $\operatorname{IntraEnc}(\cdot)$ denotes the token-level contextual encoder. The pooled feature is projected by an MLP and processed by a sentence-level recurrent layer:
+\begin{equation}
+\mathbf{e}^{T}_{im}=\operatorname{InterEnc}\left(\psi_T(\mathbf{s}_{i1}),\ldots,\psi_T(\mathbf{s}_{iM})\right)_m.
+\end{equation}
+Stacking all textual units gives $\mathbf{E}^{T}_i=[\mathbf{e}^{T}_{i1},\ldots,\mathbf{e}^{T}_{iM}]\in\mathbb{R}^{M\times d}$.
+
+The resulting textual-unit features are passed to a language-side message encoder, which returns contextualized object-level features and relation-level features. In the object branch, only the object-level textual output is used for retrieval:
+\begin{equation}
+\mathbf{T}_i=\operatorname{Normalize}\left(\operatorname{LanguageMessage}(\mathbf{E}^{T}_i)_{\mathrm{object}}\right).
+\end{equation}
+Thus, the text representation used by OLA-Place remains an object-indexed tensor $\mathbf{T}_i\in\mathbb{R}^{M\times d}$ rather than a global query descriptor.
+
+\subsection{3D Object Encoding}
+
+The scene pathway encodes each 3D cell as a set of object embeddings. Each cell $C_j$ is a list of object instances $C_j=\{x_{j1},\ldots,x_{jN_j}\}$, where $N_j$ is the actual number of objects before padding. Each object may provide a semantic label, color, center position, number of points, and object point cloud. The exact object embedding is the fusion of the feature components selected in the experiment.
+
+For point-cloud features, a PointNet2-style encoder extracts an object geometry feature and projects the selected feature level to the shared dimension $d$. When class features are not represented by a fixed embedding table, the point-cloud feature can be further enhanced by a local relation-attention module implemented inside the object encoder. This module computes pairwise relative centers inside each cell and applies multi-head attention to update object features; it is part of the object feature extractor rather than an additional retrieval branch.
+
+Other object attributes are encoded by lightweight MLPs or embedding tables: RGB color, object center $\mathbf{p}_{jn}\in\mathbb{R}^{3}$, normalized point count $\nu_{jn}$, and optionally fixed class/color embeddings. Let $\{\mathbf{a}_{jn}^{k}\}_{k\in\mathcal{F}}$ be the selected component features for object $x_{jn}$, where $\mathcal{F}$ is the enabled feature set. Each selected component is normalized, and multiple components are fused by an MLP:
+\begin{equation}
+\mathbf{e}^{O}_{jn}=\psi_{\mathrm{merge}}\left(\operatorname{Concat}\{\operatorname{Norm}(\mathbf{a}_{jn}^{k})\}_{k\in\mathcal{F}}\right).
+\end{equation}
+If only one component is enabled, that component is used directly. The output is a flat tensor containing all object embeddings in the batch. This tensor is not yet organized into fixed-size cell-level tensors; that conversion is performed by the object message encoder.
+
+\subsection{Object Message Encoder and Masks}
+
+The object message encoder converts the flat object tensor into padded cell tensors, constructs masks, and updates object features with intra-cell context. It first recovers the object boundaries of each cell from the object counts. The raw object embeddings are then scattered into
+\begin{equation}
+\mathbf{O}^{(0)}\in\mathbb{R}^{B\times N\times d},
+\end{equation}
+where $N$ is the pre-defined object-slot number. Object centers are similarly padded into $\mathbf{P}\in\mathbb{R}^{B\times N\times 3}$. For cell $C_j$, the binary object mask is
+\begin{equation}
+M_{jn}=\begin{cases}
+1,& 1\leq n\leq \min(N_j,N),\\
+0,& \text{otherwise}.
+\end{cases}
+\end{equation}
+The relation mask used inside the encoder is $R_{jab}=M_{ja}M_{jb}$. These masks correspond to the object and relation masks returned by the implementation.
+
+The encoder constructs pairwise relative geometry from padded object centers: $\mathbf{r}_{jab}=\mathbf{p}_{ja}-\mathbf{p}_{jb}$. This relative vector is projected to initial relation features $\mathbf{Q}^{(0)}\in\mathbb{R}^{B\times N\times N\times d}$. For each hidden layer $\ell$, the object stream is updated by a recurrent layer over object slots and masked:
+\begin{equation}
+\mathbf{O}^{(\ell)}=\operatorname{Rec}_{O}(\mathbf{O}^{(\ell-1)})\odot \mathbf{M}.
+\end{equation}
+The relation stream is updated from repeated source object features, repeated target object features, and the previous relation features:
+\begin{equation}
+\mathbf{Q}_{jab}^{(\ell)}=\tanh\left(\mathbf{W}_{r}[\mathbf{o}_{ja}^{(\ell-1)};\mathbf{o}_{jb}^{(\ell-1)};\mathbf{q}_{jab}^{(\ell-1)}]\right)\odot R_{jab}.
+\end{equation}
+This equation corresponds to the concatenation, linear projection, nonlinearity, and relation-mask multiplication used in the code.
+
+After the message layers, the encoder applies an ESA-style aggregation on the relation stream and returns both object-level and relation-level features. However, the object branch uses only the object-level output and the object mask. The relation-level output is not used to compute the object-branch retrieval score. Finally, the scene object features are normalized:
+\begin{equation}
+\mathbf{O}_j=F_{\mathrm{Object},j}^{P}=\operatorname{Normalize}(\mathbf{O}^{(L)}_j).
+\end{equation}
+
+\subsection{Masked Max Alignment}
+\label{sec:masked_alignment}
+
+The retrieval score is the same in training and evaluation. For query $q_i$ and cell $C_j$, let $\mathbf{T}_i=[\mathbf{t}_{i1},\ldots,\mathbf{t}_{iM}]\in\mathbb{R}^{M\times d}$ and $\mathbf{O}_j=[\mathbf{o}_{j1},\ldots,\mathbf{o}_{jN}]\in\mathbb{R}^{N\times d}$ be the normalized textual and scene object tensors. The pairwise similarity between textual unit $m$ and scene object slot $n$ is
+\begin{equation}
+A_{ij}^{mn}=\mathbf{t}_{im}^{\top}\mathbf{o}_{jn}.
+\end{equation}
+Because both features are normalized before alignment, this dot product is cosine similarity.
+
+To handle the varying number of objects across cells, we employ the occupancy mask $\mathbf{M}_j$. Invalid object slots are assigned a very small value before max pooling:
+\begin{equation}
+\widehat{A}_{ij}^{mn}=\begin{cases}
+A_{ij}^{mn},& M_{jn}=1,\\
+-100,& M_{jn}=0.
+\end{cases}
+\end{equation}
+This ensures that padded slots cannot be selected as valid matches. Each textual unit then selects its most similar valid 3D object, and the final score is the mean of these best matches:
+\begin{equation}
+S_{ij}^{O}=S(q_i,C_j)=\frac{1}{M}\sum_{m=1}^{M}\max_{1\leq n\leq N}\widehat{A}_{ij}^{mn}.
+\label{eq:masked_max_alignment}
+\end{equation}
+This one-sided soft grounding is well suited to language-based place recognition: a query usually specifies a small set of salient objects, while a 3D cell may contain many additional distractors. The max operation allows each textual cue to search over all scene objects, and the average over $M$ textual units rewards cells that consistently explain the full query. The score does not require object correspondence labels, is invariant to scene-object ordering, and avoids comparing global descriptors.
+
+For a mini-batch, the implementation vectorizes Eq.~\eqref{eq:masked_max_alignment}. It forms
+\begin{equation}
+\mathcal{A}_{ijmn}=\mathbf{t}_{im}^{\top}\mathbf{o}_{jn},
+\qquad
+\mathcal{A}\in\mathbb{R}^{B\times B\times M\times N},
+\end{equation}
+applies the broadcasted object mask, and produces a score matrix $\mathbf{S}^{O}\in\mathbb{R}^{B\times B}$. Entry $S_{ij}^{O}$ is the object-level alignment score between query $q_i$ and cell $C_j$. Diagonal entries are positive query-cell pairs, and off-diagonal entries are in-batch negatives.
+
+\subsection{Training Loss}
+
+The object branch is optimized by a score-based contrastive calibration loss, which receives the score matrix $\mathbf{S}^{O}$ and a distance weight matrix. It does not receive global descriptors. The score matrix is first converted to exponentiated scores $\exp(S_{ij}^{O}/\tau)$, where $\tau$ is the temperature. The row-normalized and column-normalized probabilities are
+\begin{equation}
+P_{ij}^{q\rightarrow C}=\frac{\exp(S_{ij}^{O}/\tau)}{\sum_{k=1}^{B}\exp(S_{ik}^{O}/\tau)},\qquad
+P_{ij}^{C\rightarrow q}=\frac{\exp(S_{ij}^{O}/\tau)}{\sum_{k=1}^{B}\exp(S_{kj}^{O}/\tau)}.
+\end{equation}
+The implementation removes diagonal positives and selects hard negatives by top-$K$ over $P^{q\rightarrow C}$. If \texttt{ratio} is outside $(0,1)$, $K=B-1$; otherwise $K=\lfloor\texttt{ratio}\cdot B\rfloor$ clipped to $[1,B-1]$. Let $H_{ij}\in\{0,1\}$ denote the resulting hard-negative mask.
+
+The distance weight matrix is computed outside the loss in \texttt{train\_object\_epoch}. The code averages object features over textual units and object slots, normalizes the means, and computes
+\begin{equation}
+D_{ij}=\left\|\operatorname{Norm}\left(\frac{1}{M}\sum_m\mathbf{t}_{im}\right)-\operatorname{Norm}\left(\frac{1}{N}\sum_n\mathbf{o}_{jn}\right)\right\|_2.
+\end{equation}
+The distance is normalized by its batch maximum and converted to
+\begin{equation}
+W_{ij}=\left(1-\frac{D_{ij}}{\max_{a,b}D_{ab}}+10^{-6}\right)^{1/\alpha},
+\end{equation}
+with clipping at the upper bound, matching the distance reweighting used in training. For the default logarithmic criterion $\varphi(x)=-\log(1-x+\epsilon)$, the loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{obj}}=\frac{1}{B}\sum_{i,j}H_{ij}W_{ij}\varphi(P_{ij}^{q\rightarrow C})+\frac{1}{B}\sum_{i,j}H_{ij}W_{ji}\varphi(P_{ij}^{C\rightarrow q}).
+\end{equation}
+This objective suppresses high-probability negative query-cell pairs according to the object-alignment score matrix. All supervision is at the query-cell level; no textual-unit to 3D-object correspondence label is used.
+
+\subsection{Inference}
+
+At inference time, database cells are encoded once into $F_{\mathrm{Object}}^{P}$ and object masks. A query is encoded into $F_{\mathrm{Object}}^{T}$. The same masked max-alignment score in Eq.~\eqref{eq:masked_max_alignment} is computed between the query and every database cell, then cells are ranked by descending score:
+\begin{equation}
+\operatorname{Rank}(q_i)=\operatorname{argsort}_{C_j\in\mathcal{G}}(-S_{ij}^{O}).
+\end{equation}
+Thus, training and inference use the same masked max-alignment rule. The only difference is that training scores are computed within a mini-batch, while inference scores are computed against the full gallery.

@@ -1,0 +1,163 @@
+\section{Modifications}
+\section{Methodology}
+\subsection{Task Formulation}
+Let $\mathcal{G} = \{R_i\}_{i=1}^{N_c}$ represent the gallery of point cloud submaps, where each submap $R_i = \{s_k\}_{k=1}^{N_s}$ contains $N_s$ object instances. The primary aim of this work is to determine the precise spatial location associated with a natural language query ${Q_i}$ (the $i$-th query in the dataset). Each query ${Q_i}$ comprises a sequence of $N_q$ relational descriptions, denoted by $\{d_j\}_{j=1}^{N_q}$. \\
+\indent We tackle this task through a coarse-to-fine strategy. In the coarse stage, the most relevant point cloud submap is retrieved using the textual query. In the fine stage, we determine the exact position within the retrieved submap. \\
+\indent This entire process is optimized by minimizing the distance between the ground-truth position and the predicted position over the data distribution $\mathcal{D}_s$:
+\begin{equation}
+\min_{\Psi,\,\Phi} \ \mathbb{E}_{({L_{gt}},\,{Q_i}) \sim \mathcal{D}_s}
+\bigl\| {L}_{gt} - \Phi\!\left({Q_i}, \tilde{R_i}\right) \bigr\|_2^2,
+\label{eq:task_obj_main}
+\end{equation}
+where ${L}_{gt} \in \mathbb{R}^2$ is the ground truth position. $\tilde{R}_i$ is the submap retrieved from $\mathcal{G}$ for the $i$-th query $Q_i$:
+\begin{equation}
+\tilde{R_i} = \arg\min_{R \in \mathcal{G}} \Delta \bigl( \Psi({Q_i}), \Psi(R_i) \bigr).
+\label{eq:task_obj_retrieval}
+\end{equation}
+\indent Equation \eqref{eq:task_obj_main} describes the fine stage, where the regressor $\Phi$ fuses the query with the retrieved submap $\tilde{R_i}$ to predict the final coordinates. Equation \eqref{eq:task_obj_retrieval} describes the coarse stage: the retrieval function $\Psi$ embeds the query and each submap into a shared latent space, uses the Euclidean distance $\Delta(\cdot,\cdot)$ to compute similarity, and selects the nearest neighbor.
+\subsection{Object Level Alignment}
+Following the definitions in the Task Formulation, given a query $Q_i$ with descriptions $\{d_j\}_{j=1}^{N_q}$ and a submap ${R_i}$ with instances $\{s_k\}_{k=1}^{N_s}$, we first extract their features. The descriptions are encoded via a frozen T5 encoder to obtain language features ${T} = \{{t}_j\}_{j=1}^{N_q}$, and the point cloud instances are encoded via a frozen PointNet++ encoder to obtain visual features ${V} = \{{v}_k\}_{k=1}^{N_s}$.
+\subsubsection{Relative Spatial Graph Construction}
+We aim to address the ambiguity of natural language and repetitive object appearances. Since relative positional relationships between objects serve as the most discriminative features, we explicitly model these spatial relationships. We construct a pairwise offset tensor ${O}^p \in \mathbb{R}^{N_s \times N_s \times 3}$:
+\begin{equation}
+{O}^{p}_{mn} = \mathrm{Coord}(s_m) - \mathrm{Coord}(s_n),
+\end{equation}
+where $m, n \in \{1, \dots, N_s\}$ denote the instance indices, and $\mathrm{Coord}(\cdot)$ returns the instance centroid. ${O}^{p}_{mn}$ represents the geometric vector from instance $n$ to $m$.
+We fuse this geometric prior with semantic features to generate an initial edge representation ${E}^{p}_{mn}$. Specifically, we concatenate the visual features of the instance pair with their spatial offset:
+\begin{equation}
+{E}^{p}_{mn} = \mathrm{MLP}_{\text{fuse}}\Bigl( \bigl[ ({v}_m , {v}_n); \mathrm{MLP}_{\text{geo}}({O}^{p}_{mn}) \bigr] \Bigr).
+\end{equation}
+\indent For the textual modality, we generate a textual relation tensor $O^{t}_{mn}$ by concatenating the semantic embeddings of description pairs and projecting them through an MLP. Then we generate $E^{t}_{mn}$ following Equation (4). This process maps implicit linguistic relations into a shared relational space, enabling alignment with visual geometric offset features.
+\subsubsection{Bézier Enhanced Object Spatial Encoder (BEOSE)}
+A modality gap exists between ${E}^{p}_{mn}$ and ${E}^{t}_{mn}$, mainly because ${O}^{p}_{mn}$ encodes precise metric distances, whereas ${O}^{t}_{mn}$ typically conveys qualitative directional cues. Large absolute distances in ${O}^{p}_{mn}$ can dominate the embedding, hindering alignment. To mitigate this, BEOSE modulates the spatial features via Bézier curves, retaining directionality while suppressing extreme magnitudes.
+For each edge ${E}^{p}_{mn}$, we employ a gated LSTM to extract a hidden state ${h}_{mn} = \mathrm{LSTM}({E}^{p}_{mn})$. This state predicts three control points for a quadratic Bézier curve: two endpoints ${P}^{(0)}, {P}^{(2)}$ and an intermediate control ${P}^{(1)}$:
+\begin{equation}
+{P}^{(0)}_{mn} = \phi_0({h}_{mn}),  {P}^{(2)}_{mn} = \phi_2({h}_{mn}), \\ {P}^{(1)}_{mn} = \phi_c({P}^{(0)}_{mn}, {P}^{(2)}_{mn}),
+\end{equation}
+where $\phi(\cdot)$ denotes projection networks. Let $\tau_{mn} \in [0, 1]$ be a learnable interpolation parameter. The modulated edge feature $\hat{{E}}^{p}_{mn}$ is synthesized as:
+\begin{align}
+\hat{{E}}^{p}_{mn}(\tau_{mn}) = & (1-\tau_{mn})^2 {P}^{(0)}_{mn} + 2(1-\tau_{mn})\tau_{mn} {P}^{(1)}_{mn} \\ \notag
+                                 + & \tau_{mn}^2 {P}^{(2)}_{mn}.
+\end{align}
+\indent Subsequently, we apply a $\tanh(\cdot)$ nonlinearity to bound the displacement, yielding one update step. We iterate the above BEOSE steps $\mathcal{K}$ times, with the final result denoted as ${E}_{mn}^{p\star}$. \\ 
+\indent Figure \ref{Fig1} illustrates the modality gap between the encoded ${E}^{p}_{mn}$ and ${E}^{t}_{mn}$, along with the optimization process via BEOSE. As depicted, BEOSE is designed to suppress extreme magnitude values in ${E}^{p}_{mn}$ while preserving directional characteristics, thereby aligning the cross-modal spatial features.
+\subsubsection{Gaussian Aggregation (GA)}
+To compress the pairwise edge features ${E}^{p\star} \in \mathbb{R}^{N_s \times N_s \times D}$ into node-level descriptors $\hat{V} \in \mathbb{R}^{N_s \times D}$  for alignment, we employ a Gaussian Aggregation module. We treat the features as probabilistic distributions. First, we generate a reparameterized latent variable ${Z}^{p\star}_{mn}= {\mu}_{mn} + {\sigma}_{mn} \odot {\epsilon}$, where ${\mu}_{mn}$ and $\sigma_{mn}$ are predicted from ${E}^{p\star}_{mn}$, and $\epsilon \sim \mathcal{N}(0, I)$ is standard Gaussian noise. We then aggregate the edge information for each subject instance $m$ by summing over all object instances $n$:
+\begin{equation}
+\hat{{v}}_m = \sum_{n=1}^{N_s} \left( \mathrm{Softmax}_n({Z}^{p\star}_{mn}) + \mathrm{Softmax}_n({E}^{p\star}_{mn}) \right).
+\end{equation}
+\indent This yields a compact spatial descriptor set $\hat{\mathcal{V}} = \{\hat{{v}}_m\}_{m=1}^{N_s}$ from ${E}^{p\star}_{mn}$ for the point cloud submap. \\
+\indent An identical aggregation is performed on ${E}^{t}_{mn}$ to obtain $\hat{\mathcal{T}} = \{\hat{{t}}_j\}_{j=1}^{N_q}$.
+\subsubsection{Cross-Modal Alignment Loss}
+We align the features at both the Spatial Level (using aggregated relations $\hat{\mathcal{V}}, \hat{\mathcal{T}}$) and the Instance Level (using raw features ${V}, {T}$).
+Consider a batch of size $B$. Let $\mathcal{X}_i$ and $\mathcal{Y}_j$ be the feature sets for point cloud submaps and descriptions. We define a bidirectional set-to-set similarity:
+\begin{equation}
+\mathcal{S}(\mathcal{X}_i, \mathcal{Y}_j) = \frac{\exp(\lambda_{ij}^{\mathcal{X}2 \mathcal{Y}}/\gamma)}{\sum_{b=1}^B \exp(\lambda_{ib}^{\mathcal{X}2 \mathcal{Y}}/\gamma)} + \frac{\exp(\lambda_{ij}^{\mathcal{Y}2 \mathcal{X}}/\gamma)}{\sum_{b=1}^B \exp(\lambda_{ib}^{\mathcal{Y}2 \mathcal{X}}/\gamma)},
+\label{eq:relation_similarity}
+\end{equation}
+where $\gamma$ is a temperature parameter and $\lambda_{ij}^{\mathcal{X}2 \mathcal{Y}}$ represents the average of the maximum similarity scores between $\mathcal{X}_i$ and $\mathcal{Y}_j$. The alignment loss is defined as:
+\begin{equation}
+\mathcal{L}_{align}(\mathcal{X}_i, \mathcal{Y}_i) = -\frac{1}{B} \sum_{i,j}^B \mathcal{E}_{ij}  (1 - \mathcal{J})^{\frac{1}{a}} \log \bigl( 1 - \mathcal{S}(\mathcal{X}_i, \mathcal{Y}_j) \bigr),
+\label{eq:relation_loss}
+\end{equation}
+where $\mathcal{E}_{ij}$ is an indicator for negative pairs (different locations), $a$ is a learnable scale parameter, and $\mathcal{J}$ is a learnable weighted parameter.  \\
+\indent Textual descriptions are inherently ambiguous and asymmetric in information content compared to the precise geometric cues of point clouds. Explicitly pulling positive pairs together may inadvertently reinforce incomplete or mismatched cross-modal alignments, thus degrading the discriminability of point cloud representations. We therefore only optimize the repulsion of negative pairs, using language primarily as exclusionary evidence to filter out non-target locations. \\ 
+\indent The total instance level loss combines the spatial loss $\mathcal{L}_{IS} = \mathcal{L}_{align}(\hat{\mathcal{V}}, \hat{\mathcal{T}})$ and the instance loss $\mathcal{L}_{IO} = \mathcal{L}_{align}(\mathcal{V}', \mathcal{T}')$, where $\mathcal{V}'$ and $\mathcal{T}'$ are obtained by projecting the raw features ${V}$ and $ {T}$ through MLP.
+\subsection{Global Level Alignment}
+\indent In the global alignment stage, our objective is to obtain global descriptors for both point cloud submap $R_i$ and language query $Q_i$. We leverage frozen PointNet++ and T5 models to generate $\{{r}_i\}_{i=1}^{N_c}$ for point cloud submaps and $\{{q}_i\}_{i=1}^K$ for their corresponding text queries.
+\indent To mitigate spatial misalignment issues, we introduce a Spectral Manifold Transform (SMT) that processes submap features in the graph spectral domain. Unlike frequency-aware encoders that rely on discrete Fourier transforms, SMT operates directly on the learned similarity structure of the feature manifold, enabling more flexible and data-driven spectral filtering.
+
+\subsubsection{Spectral Manifold Transform (SMT)}
+The SMT constructs a learnable similarity graph over the object sequence and performs spectral filtering via Chebyshev polynomials, which avoids explicit eigen-decomposition and enables end-to-end training.
+
+\indent \textbf{Similarity Graph Construction.} Given the input feature $\mathbf{X} \in \mathbb{R}^{N \times D}$ where $N$ is the sequence length and $D$ is the embedding dimension, we first compute the pairwise squared distances and construct a self-similarity adjacency matrix:
+\begin{equation}
+A_{mn} = \exp\!\left(-\frac{\|\mathbf{x}_m - \mathbf{x}_n\|_2^2}{\tau}\right) + \delta_{mn},
+\label{eq:similarity_graph}
+\end{equation}
+where $\tau > 0$ is a learnable temperature parameter and $\delta_{mn}$ is the Kronecker delta ensuring self-loops. The adjacency matrix is then row-normalized:
+\begin{equation}
+\widehat{A}_{mn} = \frac{A_{mn}}{\sum_{k=1}^{N} A_{mk} + \epsilon},
+\label{eq:row_norm}
+\end{equation}
+where $\epsilon$ is a small constant for numerical stability.
+
+\indent \textbf{Normalized Graph Laplacian.} From the normalized adjacency matrix, we compute the symmetric normalized Laplacian:
+\begin{equation}
+\mathbf{L} = \mathbf{I} - \mathbf{D}^{-\frac{1}{2}} \widehat{\mathbf{A}} \mathbf{D}^{-\frac{1}{2}},
+\label{eq:graph_laplacian}
+\end{equation}
+where $\mathbf{D}$ is the degree diagonal matrix with $D_{mm} = \sum_{n} \widehat{A}_{mn}$. For stable Chebyshev approximation, we scale $\mathbf{L}$ to the interval $[-1, 1]$:
+\begin{equation}
+\widetilde{\mathbf{L}} = \frac{\mathbf{L}}{\max_{m,n}|L_{mn}| + \epsilon}.
+\label{eq:scaled_laplacian}
+\end{equation}
+
+\indent \textbf{Chebyshev Spectral Filtering.} We approximate spectral filtering via Chebyshev polynomials of the first kind. The $k$-th Chebyshev polynomial satisfies the recurrence:
+\begin{equation}
+T_0(\widetilde{\mathbf{L}}) = \mathbf{I}, \quad T_1(\widetilde{\mathbf{L}}) = \widetilde{\mathbf{L}}, \quad T_{k+1}(\widetilde{\mathbf{L}}) = 2\widetilde{\mathbf{L}} \cdot T_k(\widetilde{\mathbf{L}}) - T_{k-1}(\widetilde{\mathbf{L}}).
+\label{eq:chebyshev_recurrence}
+\end{equation}
+The filtered output is computed as a weighted sum of Chebyshev terms:
+\begin{equation}
+\mathbf{Y}^{(b)} = \sum_{k=0}^{K-1} \alpha_k^{(b)} \, T_k(\widetilde{\mathbf{L}}) \cdot \mathbf{X},
+\label{eq:chebyshev_filter}
+\end{equation}
+where $b \in \{1, 2, 3\}$ indexes the three spectral branches (low-frequency, mid-frequency, high-frequency), $K$ is the polynomial degree, and $\alpha_k^{(b)}$ are learnable branch-specific coefficients. We apply softmax normalization over the polynomial coefficients to ensure stable gradients:
+\begin{equation}
+\widehat{\alpha}_k^{(b)} = \frac{\exp(\alpha_k^{(b)})}{\sum_{k'=0}^{K-1} \exp(\alpha_{k'}^{(b)})}.
+\label{eq:coef_softmax}
+\end{equation}
+
+\indent \textbf{Multi-Branch Fusion and Projection.} We aggregate the three spectral branches via element-wise summation $\mathbf{Y} = \mathbf{Y}^{(1)} + \mathbf{Y}^{(2)} + \mathbf{Y}^{(3)}$ and project the result onto the unit hypersphere:
+\begin{equation}
+\mathbf{Y}_{\text{norm}} = \frac{\mathbf{Y}}{\|\mathbf{Y}\|_2 + \epsilon},
+\label{eq:hypersphere_proj}
+\end{equation}
+which enforces unit-norm constraints beneficial for contrastive learning.
+
+\indent \textbf{Triple Cross-Attention Fusion.} Following SMT enhancement, we integrate features across branches via a triple cross-attention mechanism. Each branch $\mathbf{Y}^{(b)}$ is first enhanced via self-attention. We then compute cross-attention weights between the high-frequency branch and the low/mid-frequency branches:
+\begin{equation}
+\Omega_1 = \text{Softmax}\!\left(\frac{\mathbf{Y}^{(3)} \mathbf{W}_Q (\mathbf{Y}^{(1)} \mathbf{W}_K)^\top}{\sqrt{d}}\right), \quad
+\Omega_2 = \text{Softmax}\!\left(\frac{\mathbf{Y}^{(3)} \mathbf{W}_Q (\mathbf{Y}^{(2)} \mathbf{W}_K)^\top}{\sqrt{d}}\right),
+\label{eq:cross_attention}
+\end{equation}
+where $\mathbf{W}_Q, \mathbf{W}_K$ are projection matrices. The combined attention $\Omega_{\text{comb}} = \Omega_1 \odot \Omega_2$ (element-wise product) modulates the high-frequency branch:
+\begin{equation}
+\boldsymbol{\kappa} = \text{Attention}(\Omega_{\text{comb}}, \mathbf{Y}^{(3)}).
+\label{eq:triple_attention}
+\end{equation}
+
+\indent \textbf{Global Descriptor Generation.} The fused feature $\boldsymbol{\kappa}$ is processed by a bidirectional GRU followed by a Transformer encoder layer to capture sequential dependencies. The output is dimension-reduced by extracting even-indexed hidden units, yielding the global point descriptor $P^{g}_i \in \mathbb{R}^D$. For the textual query $q_i$, we employ a stacked architecture consisting of attention and max-pooling layers to generate the global descriptor $Q^{g}_i$. 
+
+\indent At the global level, the loss function follows the same contrastive formulation as in the Object Level Alignment:
+\begin{equation}
+\mathcal{S}_{ij} = \frac{\exp({P^{g}_i}^\top Q^{g}_j/\gamma)}{\sum_{b}^B \exp({P^{g}_i}^\top Q^{g}_b/\gamma)} + \frac{\exp({Q^{g}_i}^\top P^{g}_j/\gamma)}{\sum_{b}^B \exp({Q^{g}_i}^\top P^{g}_b/\gamma)},
+\label{eq:global_similarity}
+\end{equation}
+where $\gamma$ is a temperature parameter. The global-level alignment loss is defined as:
+\begin{equation}
+\mathcal{L}_{\text{Global}}= -\frac{1}{B} \sum_{i,j}^B \mathcal{E}_{ij}  (1 - \mathcal{J})^{\frac{1}{a}} \log \bigl( 1 - \mathcal{S}_{ij} \bigr).
+\label{eq:global_loss}
+\end{equation}\\
+\indent Overall, the total loss in the coarse stage is:
+\begin{equation}
+\mathcal{L}_{\text{Coarse}} = \mathcal{L}_{\text{Global}} + \mathcal{L}_{\text{IS}} + \mathcal{L}_{\text{IO}}.
+\label{eq:coarse_loss}
+\end{equation}
+\subsection{Fine Stage} 
+\indent In the fine stage, we propose the Uncertainty Aware Gaussian Fine Localizer (UGFL) to quantify the degree of cross-modal ambiguity between the query text and the semantic submap. This allows the network to adaptively adjust its optimization strategy based on varying levels of uncertainty. \\
+\indent We initiate the process with feature fusion in the fine stage. To implement this, we adopt an alternating structure of Mamba and Cross Attention. Specifically, Cross Attention injects complementary modal information into Mamba’s hidden space, enabling the model to establish effective and expressive cross-modal fusion. Subsequently, the resulting fused feature is denoted as $\mathbf{f}_u$. \\
+\indent We model final coordinate prediction in the fine-grained stage as a Gaussian distribution. Specifically, two independent MLPs process the fused feature $f_u$ to predict the two 2D Gaussian core parameters: one outputs the mean $\boldsymbol{\eta}$ (stage-predicted coordinates), and the other learns the covariance matrix $\mathbf{C}$ (quantifying cross-modal ambiguity). We define the likelihood of $L_{gt}$ under the predicted Gaussian as:\\
+\begin{equation}
+P = \frac{\exp\left(-\frac{1}{2}\left(L_{\text{gt}} - \boldsymbol{\eta}\right)^\top \mathbf{C}^{-1} \left(L_{\text{gt}} - \boldsymbol{\eta}\right)\right)}{2\pi\sqrt{|\mathbf{C}|}}
+\label{eq:likelihood}
+\end{equation}
+\indent Maximizing the likelihood is equivalent to minimizing the negative log-likelihood, which is thus adopted as the loss function:
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\text{fine}} = \frac{1}{2}\left(L_{\text{gt}} - \boldsymbol{\eta}\right)^\top \mathbf{C}^{-1} \left(L_{\text{gt}} - \boldsymbol{\eta}\right) + \frac{1}{2}\ln|\mathbf{C}| + \ln2\pi,
+\end{aligned}
+\label{eq:reg_loss}
+\end{equation}
+\indent The first term penalizes the deviation between the predicted and the ground truth positions, and the second term regularizes high uncertainty. The model leverages uncertainty estimates to dynamically adjust the optimization process according to sample characteristics. For challenging, weakly matched samples, the network may predict a larger covariance $\mathbf{C}$, which reduces the penalty associated with large residuals $(L_{gt}-\boldsymbol{\eta})$ and thus mitigates their impact on training.
